@@ -403,9 +403,12 @@ def test_shared():
           os.listdir(claims))
     c = json.load(open(claim_file))
     c["pid"] = 999999
-    c["host"] = subprocess.run([PY, "-c",
-                                "import socket;print(socket.gethostname())"],
-                               stdout=subprocess.PIPE).stdout.decode().strip()
+    # The host is left exactly as bider wrote it, because that is what makes
+    # the claim look local - which is the whole point of this test.  Writing a
+    # raw socket.gethostname() here used to look equivalent and was not: bider
+    # stores the sanitised, truncated form, so on a runner whose name is over
+    # 32 characters the two never compared equal and the dead-pid claim stayed
+    # live forever.
     c["at_epoch"] = time.time() - 600
     c["expires_at"] = time.time() + 600
     json.dump(c, open(claim_file, "w"))
