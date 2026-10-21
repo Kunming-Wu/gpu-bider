@@ -34,9 +34,9 @@ dev = ["pytest>=7"]
 bider = "bider:main"
 
 [project.urls]
-Homepage = "https://github.com/wkmallmx/gpu-bider"
-Issues = "https://github.com/wkmallmx/gpu-bider/issues"
-Changelog = "https://github.com/wkmallmx/gpu-bider/releases"
+Homepage = "https://github.com/Kunming-Wu/gpu-bider"
+Issues = "https://github.com/Kunming-Wu/gpu-bider/issues"
+Changelog = "https://github.com/Kunming-Wu/gpu-bider/releases"
 
 [tool.setuptools]
 py-modules = ["bider"]

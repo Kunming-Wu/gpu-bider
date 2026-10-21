@@ -7,8 +7,8 @@
 **A polite GPU job queue.** It waits for the card, uses it the moment it is
 free, and never touches anybody else's process.
 
-[![CI](https://github.com/wkmallmx/gpu-bider/actions/workflows/ci.yml/badge.svg)](https://github.com/wkmallmx/gpu-bider/actions/workflows/ci.yml)
-[![Python](https://img.shields.io/badge/python-3.8%20%7C%203.11%20%7C%203.12-2a78d6)](https://github.com/wkmallmx/gpu-bider)
+[![CI](https://github.com/Kunming-Wu/gpu-bider/actions/workflows/ci.yml/badge.svg)](https://github.com/Kunming-Wu/gpu-bider/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/python-3.8%20%7C%203.11%20%7C%203.12-2a78d6)](https://github.com/Kunming-Wu/gpu-bider)
 [![Dependencies](https://img.shields.io/badge/dependencies-none-0ca30c)](pyproject.toml)
 [![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-52514e)](#)
 [![License](https://img.shields.io/badge/license-MIT-2a78d6)](LICENSE)
@@ -59,14 +59,14 @@ running, and safe for a colleague to install next to yours.
 ## Install
 
 ```bash
-pipx install git+https://github.com/wkmallmx/gpu-bider
+pipx install git+https://github.com/Kunming-Wu/gpu-bider
 ```
 
 <details>
 <summary>Without pipx, or without installing at all</summary>
 
 ```bash
-git clone https://github.com/wkmallmx/gpu-bider && cd gpu-bider
+git clone https://github.com/Kunming-Wu/gpu-bider && cd gpu-bider
 python install.py --check     # diagnostics: python, nvidia-smi, selftest
 python install.py             # seeds ~/.bider and writes ./bider + ./bider.cmd
 ```
