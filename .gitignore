@@ -1,0 +1,23 @@
+# Runtime state: never commit anybody's queue, claims or logs.
+# Everything bider writes lives here.
+~/.bider/
+state/
+runs/
+logs/
+
+# Generated wrappers, not source
+bider
+bider.cmd
+
+# The installed copy of the skill is generated from skill/gpu-bider/
+.claude/skills/gpu-bider/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/

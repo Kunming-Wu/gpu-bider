@@ -1,0 +1,1191 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="auto">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gpu-bider — a polite GPU job queue</title>
+<meta name="description" content="A polite GPU job queue: it waits for the card, uses it the moment it is free, and never touches anybody else's process.">
+<link rel="icon" href="assets/logo.svg" type="image/svg+xml">
+<meta property="og:title" content="gpu-bider — a polite GPU job queue">
+<meta property="og:description" content="Waits for the card, uses it the moment it is free, never touches anybody else's process.">
+<meta property="og:image" content="assets/logo.svg">
+<meta property="og:type" content="website">
+<style>
+/* ─────────────────────────────────────────────────────────────────────────
+   Tokens. Light and dark are both selected, not flipped: the dark steps come
+   from the same ramps, validated against the dark surface.
+   ───────────────────────────────────────────────────────────────────────── */
+:root {
+  color-scheme: light;
+  --surface-1:      #fcfcfb;   /* card */
+  --surface-2:      #f9f9f7;   /* page plane */
+  --text-primary:   #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted:     #898781;
+  --grid:           #e1e0d9;
+  --axis:           #c3c2b7;
+  --border:         rgba(11, 11, 11, 0.10);
+  --border-strong:  rgba(11, 11, 11, 0.18);
+  --series-1:       #2a78d6;   /* blue   — your task */
+  --series-2:       #eb6834;   /* orange — the desktop reserve */
+  --series-3:       #1baf7a;   /* aqua   — free (relief: always labelled) */
+  --neutral-fill:   #c3c2b7;   /* another person's usage: not a series */
+  --good:           #0ca30c;
+  --critical:       #d03b3b;
+  --warning:        #fab219;
+  --track:          #ecebe5;
+  --code-bg:        #f2f1ec;
+  --shadow:         0 1px 2px rgba(11,11,11,.04), 0 8px 24px -12px rgba(11,11,11,.14);
+  --radius:         14px;
+  --maxw:           68rem;
+  --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --surface-1:      #1a1a19;
+    --surface-2:      #0d0d0d;
+    --text-primary:   #f0efec;
+    --text-secondary: #c3c2b7;
+    --text-muted:     #898781;
+    --grid:           #2c2c2a;
+    --axis:           #383835;
+    --border:         rgba(255, 255, 255, 0.10);
+    --border-strong:  rgba(255, 255, 255, 0.20);
+    --series-1:       #3987e5;
+    --series-2:       #d95926;
+    --series-3:       #199e70;
+    --neutral-fill:   #4a4a46;
+    --good:           #0ca30c;
+    --critical:       #d03b3b;
+    --warning:        #fab219;
+    --track:          #262624;
+    --code-bg:        #232322;
+    --shadow:         0 1px 2px rgba(0,0,0,.4), 0 8px 24px -12px rgba(0,0,0,.7);
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --surface-1:      #1a1a19;
+  --surface-2:      #0d0d0d;
+  --text-primary:   #f0efec;
+  --text-secondary: #c3c2b7;
+  --text-muted:     #898781;
+  --grid:           #2c2c2a;
+  --axis:           #383835;
+  --border:         rgba(255, 255, 255, 0.10);
+  --border-strong:  rgba(255, 255, 255, 0.20);
+  --series-1:       #3987e5;
+  --series-2:       #d95926;
+  --series-3:       #199e70;
+  --neutral-fill:   #4a4a46;
+  --good:           #0ca30c;
+  --critical:       #d03b3b;
+  --warning:        #fab219;
+  --track:          #262624;
+  --code-bg:        #232322;
+  --shadow:         0 1px 2px rgba(0,0,0,.4), 0 8px 24px -12px rgba(0,0,0,.7);
+}
+
+/* ── base ─────────────────────────────────────────────────────────────── */
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; scroll-padding-top: 5rem; }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  * { transition: none !important; animation: none !important; }
+}
+body {
+  margin: 0;
+  background: var(--surface-2);
+  color: var(--text-primary);
+  font-family: var(--sans);
+  font-size: 16px;
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+}
+a { color: var(--series-1); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+a:hover { text-decoration-thickness: 2px; }
+:focus-visible { outline: 2px solid var(--series-1); outline-offset: 3px; border-radius: 4px; }
+h1, h2, h3 { line-height: 1.2; letter-spacing: -0.015em; margin: 0; }
+h2 { font-size: clamp(1.5rem, 1.1rem + 1.6vw, 2.05rem); }
+h3 { font-size: 1.06rem; }
+p { margin: 0 0 1rem; }
+code, kbd, pre { font-family: var(--mono); font-size: 0.875em; }
+code:not(pre code) {
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 0.08em 0.36em;
+}
+hr { border: 0; border-top: 1px solid var(--grid); margin: 3.5rem 0; }
+
+.wrap { max-width: var(--maxw); margin: 0 auto; padding: 0 1.25rem; }
+/* Hidden until focused: clip rather than offset, so it can never paint
+   off-canvas in a full-page screenshot or a print. */
+.skip {
+  position: absolute; width: 1px; height: 1px; overflow: hidden;
+  clip-path: inset(50%); white-space: nowrap; top: 0; left: 0;
+}
+.skip:focus {
+  position: fixed; width: auto; height: auto; clip-path: none;
+  z-index: 100; padding: .6rem 1rem; border-radius: 0 0 8px 0;
+  background: var(--surface-1); border: 1px solid var(--border);
+  color: var(--text-primary);
+}
+
+/* ── nav ──────────────────────────────────────────────────────────────── */
+header.nav {
+  position: sticky; top: 0; z-index: 50;
+  background: color-mix(in srgb, var(--surface-2) 88%, transparent);
+  backdrop-filter: saturate(1.4) blur(10px);
+  border-bottom: 1px solid var(--border);
+}
+.nav-in {
+  max-width: var(--maxw); margin: 0 auto; padding: .6rem 1.25rem;
+  display: flex; align-items: center; gap: 1rem;
+}
+.brand {
+  display: flex; align-items: center; gap: .55rem;
+  font-weight: 640; letter-spacing: -0.02em; color: var(--text-primary);
+  text-decoration: none; font-size: 1.02rem;
+}
+.brand img { width: 26px; height: 26px; display: block; }
+.nav nav { margin-left: auto; display: flex; align-items: center; gap: .25rem; }
+.nav nav a {
+  color: var(--text-secondary); text-decoration: none; font-size: .875rem;
+  padding: .35rem .6rem; border-radius: 7px;
+}
+.nav nav a:hover { background: var(--code-bg); color: var(--text-primary); }
+@media (max-width: 720px) { .nav nav a.hide-sm { display: none; } }
+.iconbtn {
+  border: 1px solid var(--border); background: var(--surface-1); color: var(--text-secondary);
+  width: 32px; height: 32px; border-radius: 8px; cursor: pointer;
+  display: grid; place-items: center; padding: 0;
+}
+.iconbtn:hover { color: var(--text-primary); border-color: var(--border-strong); }
+.iconbtn svg { width: 16px; height: 16px; }
+:root[data-theme="dark"] .i-moon,
+:root[data-theme="light"] .i-sun { display: none; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .i-sun { display: none; }
+  :root:not([data-theme="light"]) .i-moon { display: block; }
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) .i-moon { display: none; }
+}
+
+/* ── hero ─────────────────────────────────────────────────────────────── */
+.hero { padding: clamp(2.5rem, 1rem + 6vw, 5rem) 0 1rem; }
+.hero-grid {
+  display: grid; gap: clamp(1.5rem, 1rem + 3vw, 3.5rem);
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, .85fr);
+  align-items: center;
+}
+@media (max-width: 860px) { .hero-grid { grid-template-columns: 1fr; } }
+.eyebrow {
+  display: inline-flex; align-items: center; gap: .5rem;
+  font-size: .78rem; font-weight: 600; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--text-muted); margin-bottom: 1rem;
+}
+.eyebrow .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--series-3); }
+h1.title {
+  font-size: clamp(2.3rem, 1.4rem + 4.4vw, 4rem);
+  font-weight: 700; letter-spacing: -0.035em; margin-bottom: .75rem;
+}
+h1.title .sub { display: block; color: var(--text-muted); font-weight: 500; }
+.lede { font-size: clamp(1.05rem, .98rem + .4vw, 1.24rem); color: var(--text-secondary); max-width: 34rem; }
+.lede strong { color: var(--text-primary); font-weight: 620; }
+
+.badges { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: 1.4rem; }
+.badges img { display: block; height: 20px; }
+
+.heroart {
+  background: var(--surface-1); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 1.5rem; box-shadow: var(--shadow);
+  display: grid; place-items: center; gap: 1rem;
+}
+.heroart img { width: 116px; height: 116px; }
+.heroart figcaption { font-size: .82rem; color: var(--text-muted); text-align: center; }
+
+/* ── code blocks ──────────────────────────────────────────────────────── */
+.codewrap { position: relative; }
+pre {
+  margin: 0; background: var(--code-bg); border: 1px solid var(--border);
+  border-radius: 11px; padding: .95rem 3rem .95rem 1rem; overflow-x: auto;
+  line-height: 1.6; color: var(--text-primary);
+}
+pre .c { color: var(--text-muted); }
+pre .k { color: var(--series-1); }
+pre .s { color: var(--series-2); }
+.copy {
+  position: absolute; top: .5rem; right: .5rem;
+  border: 1px solid var(--border); background: var(--surface-1); color: var(--text-secondary);
+  border-radius: 7px; padding: .25rem .5rem; font: 600 .72rem/1 var(--sans);
+  cursor: pointer; opacity: 0; transition: opacity .12s;
+}
+.codewrap:hover .copy, .copy:focus-visible { opacity: 1; }
+.copy.done { color: var(--good); border-color: var(--good); opacity: 1; }
+
+/* ── sections ─────────────────────────────────────────────────────────── */
+section { padding: clamp(2.4rem, 1.5rem + 3vw, 4rem) 0; }
+.sec-head { max-width: 44rem; margin-bottom: 2rem; }
+.sec-head p { color: var(--text-secondary); margin-top: .7rem; }
+.kicker {
+  font-size: .76rem; font-weight: 650; letter-spacing: .08em; text-transform: uppercase;
+  color: var(--text-muted); display: block; margin-bottom: .55rem;
+}
+
+.card {
+  background: var(--surface-1); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 1.4rem;
+}
+.grid2 { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(19rem, 1fr)); }
+.grid3 { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); }
+
+/* ── the two rules ────────────────────────────────────────────────────── */
+.rule { display: flex; gap: 1rem; align-items: flex-start; }
+.rule .num {
+  flex: 0 0 auto; width: 30px; height: 30px; border-radius: 9px;
+  background: var(--series-1); color: #fff; display: grid; place-items: center;
+  font-weight: 700; font-size: .92rem;
+}
+.rule h3 { margin-bottom: .3rem; }
+.rule p { margin: 0; color: var(--text-secondary); font-size: .93rem; }
+
+/* ── problem / solution comparison ────────────────────────────────────── */
+.compare { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(21rem, 1fr)); }
+.compare .card { display: flex; flex-direction: column; }
+.tag {
+  display: inline-flex; align-items: center; gap: .4rem; align-self: flex-start;
+  font-size: .75rem; font-weight: 650; padding: .2rem .55rem; border-radius: 999px;
+  border: 1px solid var(--border); color: var(--text-secondary); margin-bottom: .9rem;
+}
+.tag.bad { color: var(--critical); border-color: color-mix(in srgb, var(--critical) 40%, transparent); }
+.tag.good { color: var(--good); border-color: color-mix(in srgb, var(--good) 40%, transparent); }
+.actors { display: grid; gap: .55rem; margin: .4rem 0 1rem; }
+.actor {
+  display: flex; align-items: center; gap: .6rem; font-size: .87rem;
+  color: var(--text-secondary);
+}
+.actor .who {
+  font-weight: 620; color: var(--text-primary); min-width: 4.2rem;
+  font-family: var(--mono); font-size: .82rem;
+}
+.actor .bar { flex: 1; height: 8px; border-radius: 4px; background: var(--track); position: relative; }
+.actor .bar i { position: absolute; inset: 0 auto 0 0; border-radius: 4px; display: block; }
+.verdict { font-size: .87rem; margin: auto 0 0; padding-top: .9rem; border-top: 1px solid var(--grid); }
+.verdict b { color: var(--text-primary); }
+.verdict.bad b { color: var(--critical); }
+.verdict.good b { color: var(--good); }
+
+/* ── decision ladder ──────────────────────────────────────────────────── */
+.ladder { counter-reset: step; display: grid; gap: .5rem; margin: 0; padding: 0; list-style: none; }
+.ladder li {
+  display: grid; grid-template-columns: 2rem 1fr auto; align-items: baseline; gap: .8rem;
+  padding: .7rem .9rem; border: 1px solid var(--border); border-radius: 10px;
+  background: var(--surface-1); font-size: .93rem;
+}
+.ladder li::before {
+  counter-increment: step; content: counter(step);
+  font: 650 .78rem/1 var(--mono); color: var(--text-muted);
+}
+.ladder .what { color: var(--text-primary); font-weight: 600; }
+.ladder .how { color: var(--text-secondary); display: block; font-size: .86rem; margin-top: .15rem; }
+.ladder .gate {
+  font: 650 .72rem/1 var(--mono); padding: .25rem .5rem; border-radius: 6px;
+  border: 1px solid var(--border); color: var(--text-muted); white-space: nowrap;
+}
+.ladder .gate.hard { color: var(--critical); border-color: color-mix(in srgb, var(--critical) 35%, transparent); }
+
+/* ── simulator ────────────────────────────────────────────────────────── */
+.sim { display: grid; gap: 1.5rem; grid-template-columns: minmax(0, 20rem) minmax(0, 1fr); }
+@media (max-width: 820px) { .sim { grid-template-columns: 1fr; } }
+.field { margin-bottom: 1rem; }
+.field label {
+  display: flex; justify-content: space-between; align-items: baseline;
+  font-size: .84rem; color: var(--text-secondary); margin-bottom: .35rem; gap: 1rem;
+}
+.field label b {
+  font-variant-numeric: tabular-nums; color: var(--text-primary);
+  font-weight: 620; font-size: .86rem;
+}
+input[type=range] { width: 100%; accent-color: var(--series-1); }
+.switchrow { display: flex; align-items: center; gap: .5rem; font-size: .84rem; color: var(--text-secondary); }
+.switchrow input { accent-color: var(--series-1); }
+
+.meter { margin: 1.15rem 0 .4rem; }
+.meter-track {
+  display: flex; height: 34px; border-radius: 8px; overflow: hidden;
+  background: var(--track); gap: 2px;   /* the 2px surface gap between segments */
+}
+.meter-seg {
+  height: 100%; position: relative; min-width: 0;
+  display: grid; place-items: center; overflow: hidden;
+  font: 620 .72rem/1 var(--sans); color: #fff; white-space: nowrap;
+}
+.meter-seg:first-child { border-radius: 8px 0 0 8px; }
+.meter-seg:last-child { border-radius: 0 8px 8px 0; }
+.meter-seg.others { background: var(--neutral-fill); }
+.meter-seg.mine   { background: var(--series-1); color: #fff; }
+.meter-seg.resv   { background: var(--series-2); color: #fff; }
+.meter-seg.free   { background: transparent; color: var(--text-muted); }
+/* ink, not white, on the light neutral fill — luminance decides the label ink */
+.meter-seg.others { background: var(--neutral-fill); color: var(--text-primary); }
+.meter-note { font-size: .78rem; color: var(--text-muted); margin: .55rem 0 0; }
+.meter-scale {
+  display: flex; justify-content: space-between; font-size: .72rem;
+  color: var(--text-muted); font-variant-numeric: tabular-nums; margin-top: .3rem;
+}
+.legend { display: flex; flex-wrap: wrap; gap: .9rem; margin-top: .9rem; }
+.legend span { display: inline-flex; align-items: center; gap: .4rem; font-size: .8rem; color: var(--text-secondary); }
+.legend i { width: 10px; height: 10px; border-radius: 3px; display: block; }
+
+.verdict-box {
+  margin-top: 1.25rem; padding: 1rem 1.1rem; border-radius: 11px;
+  border: 1px solid var(--border); background: var(--surface-2);
+}
+.verdict-box .head { display: flex; align-items: center; gap: .55rem; font-weight: 640; margin-bottom: .5rem; }
+.verdict-box .head svg { width: 18px; height: 18px; flex: 0 0 auto; }
+.verdict-box.yes .head { color: var(--good); }
+.verdict-box.no .head { color: var(--critical); }
+.verdict-box .math {
+  font-family: var(--mono); font-size: .8rem; color: var(--text-secondary);
+  background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px;
+  padding: .7rem .8rem; margin: 0; overflow-x: auto; line-height: 1.7;
+}
+.verdict-box .fired {
+  font-size: .87rem; color: var(--text-secondary); margin: .75rem 0 0;
+}
+.verdict-box .fired b { color: var(--text-primary); }
+.chain { display: flex; flex-wrap: wrap; gap: .3rem; margin: .1rem 0 .8rem; font-size: .72rem; }
+.chain span {
+  padding: .15rem .45rem; border-radius: 5px; border: 1px solid var(--border);
+  color: var(--text-muted); font-family: var(--mono);
+}
+.chain span.on { color: var(--text-primary); border-color: var(--border-strong); background: var(--code-bg); }
+.chain span.stop { color: var(--critical); border-color: color-mix(in srgb, var(--critical) 40%, transparent); }
+.chain span.pass { color: var(--good); }
+
+/* ── memory kinds ─────────────────────────────────────────────────────── */
+.tabs { display: flex; gap: .3rem; margin-bottom: 1rem; flex-wrap: wrap; }
+.tabs button {
+  border: 1px solid var(--border); background: var(--surface-1); color: var(--text-secondary);
+  border-radius: 9px; padding: .45rem .85rem; font: 600 .85rem/1 var(--sans); cursor: pointer;
+}
+.tabs button[aria-selected="true"] { color: var(--text-primary); border-color: var(--border-strong); background: var(--code-bg); }
+.tabpanel[hidden] { display: none; }
+.tabpanel p { color: var(--text-secondary); font-size: .93rem; }
+.tabpanel ul { margin: 0 0 1rem; padding-left: 1.1rem; color: var(--text-secondary); font-size: .93rem; }
+.tabpanel li { margin-bottom: .35rem; }
+.tabpanel li b { color: var(--text-primary); font-weight: 620; }
+
+table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+th, td { text-align: left; padding: .6rem .7rem; border-bottom: 1px solid var(--grid); vertical-align: top; }
+th { font-weight: 620; color: var(--text-secondary); font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; }
+td code { white-space: nowrap; }
+tbody tr:last-child td { border-bottom: 0; }
+.scroll-x { overflow-x: auto; }
+
+/* ── limits ───────────────────────────────────────────────────────────── */
+.limits { display: grid; gap: .75rem; }
+.limit { display: flex; gap: .85rem; align-items: flex-start; font-size: .9rem; color: var(--text-secondary); }
+.limit .mk { flex: 0 0 auto; margin-top: .5rem; width: 7px; height: 7px; border-radius: 50%; background: var(--warning); }
+.limit b { color: var(--text-primary); font-weight: 620; }
+
+/* ── footer ───────────────────────────────────────────────────────────── */
+footer {
+  border-top: 1px solid var(--border); margin-top: 2rem;
+  padding: 2.5rem 0 3.5rem; color: var(--text-muted); font-size: .87rem;
+}
+.foot-in { display: flex; flex-wrap: wrap; gap: 1rem; align-items: center; justify-content: space-between; }
+footer a { color: var(--text-secondary); }
+.visually-hidden {
+  position: absolute; width: 1px; height: 1px; overflow: hidden;
+  clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap;
+}
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="nav">
+  <div class="nav-in">
+    <a class="brand" href="#top"><img src="assets/logo.svg" alt="">gpu-bider</a>
+    <nav aria-label="Sections">
+      <a href="#problem" class="hide-sm">Why</a>
+      <a href="#decides">How</a>
+      <a href="#simulate" class="hide-sm">Try it</a>
+      <a href="#memory" class="hide-sm">Memory</a>
+      <a href="#limits" class="hide-sm">Limits</a>
+      <a href="https://github.com/wkmallmx/gpu-bider">GitHub</a>
+      <button class="iconbtn" id="theme" type="button" aria-label="Switch colour theme">
+        <svg class="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>
+        </svg>
+        <svg class="i-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>
+        </svg>
+      </button>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+
+<!-- ── hero ──────────────────────────────────────────────────────────── -->
+<div id="top"></div>
+<section class="hero">
+  <div class="wrap hero-grid">
+    <div>
+      <span class="eyebrow"><span class="dot"></span>No daemon · no root · no account</span>
+      <h1 class="title">gpu-bider<span class="sub">a polite GPU job queue</span></h1>
+      <p class="lede">
+        It waits for the card, starts the next experiment the moment it is free,
+        and <strong>never touches anybody else's process</strong>. Built for the
+        shared box where four people want one GPU and nobody has root.
+      </p>
+      <div class="badges">
+        <img src="https://img.shields.io/badge/python-3.8%20%7C%203.11%20%7C%203.12-2a78d6?style=flat-square" alt="Python 3.8, 3.11, 3.12">
+        <img src="https://img.shields.io/badge/dependencies-none-0ca30c?style=flat-square" alt="No dependencies">
+        <img src="https://img.shields.io/badge/tests-no%20GPU%20required-0ca30c?style=flat-square" alt="Tests need no GPU">
+        <img src="https://img.shields.io/badge/license-MIT-52514e?style=flat-square" alt="MIT licence">
+      </div>
+      <div class="codewrap" style="margin-top:1.4rem;max-width:32rem">
+        <pre id="install-cmd"><span class="c"># install</span>
+pipx install git+https://github.com/wkmallmx/gpu-bider</pre>
+        <button class="copy" data-copy="install-cmd" type="button">Copy</button>
+      </div>
+    </div>
+
+    <figure class="heroart" style="margin:0">
+      <img src="assets/logo.svg" alt="A GPU card with three memory slots, one of them free and marked">
+      <figcaption>One slot free, and something waiting for it.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<!-- ── the problem ───────────────────────────────────────────────────── -->
+<section id="problem">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="kicker">The problem</span>
+      <h2>Two people who both check first still collide</h2>
+      <p>
+        A decision is not visible in <code>nvidia-smi</code> until seconds later.
+        Nothing in a naive polling loop covers that gap — and the failure mode is
+        not a slow job, it is a dead one.
+      </p>
+    </div>
+
+    <div class="compare">
+      <div class="card">
+        <span class="tag bad">
+          <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+          Two naive watchers
+        </span>
+        <div class="actors">
+          <div class="actor"><span class="who">alice</span><span class="bar"><i style="width:33%;background:var(--series-1)"></i></span><span>3 GB</span></div>
+          <div class="actor"><span class="who">bob</span><span class="bar"><i style="width:33%;background:var(--series-2)"></i></span><span>3 GB</span></div>
+        </div>
+        <p style="font-size:.9rem;color:var(--text-secondary)">
+          Both see a 5 GB gap, both conclude their 3 GB task fits, both start.
+          6 GB into a 5 GB hole.
+        </p>
+        <p class="verdict bad"><b>One of them dies with a CUDA OOM</b> — and it
+          was the tool that caused it, so it gets uninstalled.</p>
+      </div>
+
+      <div class="card">
+        <span class="tag good">
+          <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8.5l3.2 3.2L13 5"/></svg>
+          Two biders
+        </span>
+        <div class="actors">
+          <div class="actor"><span class="who">alice</span><span class="bar"><i style="width:33%;background:var(--series-1)"></i></span><span>3 GB</span></div>
+          <div class="actor"><span class="who">bob</span><span class="bar"><i style="width:11%;background:var(--series-2);opacity:.4"></i></span><span>waits</span></div>
+        </div>
+        <p style="font-size:.9rem;color:var(--text-secondary)">
+          Alice writes a <em>claim</em> before starting. Bob's decision subtracts
+          it, sees 2 GB left, and declines.
+        </p>
+        <p class="verdict good"><b>Bob waits on purpose</b> — and starts the
+          second the card is genuinely free.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── the two rules ─────────────────────────────────────────────────── -->
+<section style="padding-top:0">
+  <div class="wrap">
+    <div class="grid2">
+      <div class="card rule">
+        <span class="num" aria-hidden="true">1</span>
+        <div>
+          <h3>It never touches another process</h3>
+          <p>
+            No signals, no preemption, no killing. If somebody else is running,
+            it is simply not your turn yet. There are exactly two call sites that
+            can stop anything, and both act only on pids bider itself started.
+          </p>
+        </div>
+      </div>
+      <div class="card rule">
+        <span class="num" aria-hidden="true">2</span>
+        <div>
+          <h3>Waiting is queued, not raced</h3>
+          <p>
+            A claim is written before anything starts, so two people cannot both
+            decide the same free card is theirs. The loser re-evaluates on the
+            next tick — it costs a poll, never a job.
+          </p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── how it decides ────────────────────────────────────────────────── -->
+<section id="decides">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="kicker">How it decides</span>
+      <h2>Five gates, in order. The first one that says no wins.</h2>
+      <p>
+        Every refusal carries its reason, and the reason is what you get back —
+        in <code>probe</code>, in <code>status</code>, and in the payload the
+        watcher prints.
+      </p>
+    </div>
+
+    <ol class="ladder">
+      <li>
+        <span class="what">memory</span>
+        <span class="how">A colleague flagged as not-to-be-disturbed is on the card, or a reserved window is in force.</span>
+        <span class="gate hard">hard block</span>
+      </li>
+      <li>
+        <span class="what">claims</span>
+        <span class="how">Live reservations by other bider instances are subtracted from what the card reports as free.</span>
+        <span class="gate hard">hard block</span>
+      </li>
+      <li>
+        <span class="what">capacity</span>
+        <span class="how">After the task's own appetite, is enough left for the desktop? Memory and utilization both.</span>
+        <span class="gate hard">hard block</span>
+      </li>
+      <li>
+        <span class="what">first fit</span>
+        <span class="how">If the head of the queue does not fit, try the next task rather than stalling everything behind it.</span>
+        <span class="gate">routing</span>
+      </li>
+      <li>
+        <span class="what">intent</span>
+        <span class="how">Somebody registered for the same room before us. Stand down rather than race for the last gigabyte.</span>
+        <span class="gate">courtesy</span>
+      </li>
+    </ol>
+
+    <div class="grid2" style="margin-top:1.5rem">
+      <div class="card">
+        <h3 style="margin-bottom:.5rem">The reserve</h3>
+        <p style="color:var(--text-secondary);font-size:.93rem;margin:0">
+          By default <b style="color:var(--text-primary)">2 GB and 25%</b> are held back
+          from every task, because on most of these boxes the GPU is also driving
+          the display. That is why a 5 GB task will not start on a 6 GB card even
+          when the card looks idle — by design, not by bug.
+        </p>
+      </div>
+      <div class="card">
+        <h3 style="margin-bottom:.5rem">Run order</h3>
+        <p style="color:var(--text-secondary);font-size:.93rem;margin:0">
+          Pinned first, then explicit rank, then <b style="color:var(--text-primary)">cheapest
+          first</b> — ascending <code>gpus × vram × util</code>. A thirty-second smoke
+          test should not sit behind a six-hour training run. Profiles bias it
+          further; <code>pin</code> always wins.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── simulator ─────────────────────────────────────────────────────── -->
+<section id="simulate">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="kicker">Try the arithmetic</span>
+      <h2>Set the card up and watch the gates fire</h2>
+      <p>
+        This is the same formula <code>bider.py</code> runs, in the same order.
+        Move the sliders — the verdict, the gate that fired, and the numbers
+        behind it all update.
+      </p>
+    </div>
+
+    <div class="card">
+      <div class="sim">
+        <div>
+          <div class="field">
+            <label for="s-free">Card free memory <b><span id="s-free-v">5.8</span> GB</b></label>
+            <input type="range" id="s-free" min="0" max="24" step="0.1" value="5.8">
+          </div>
+          <div class="field">
+            <label for="s-util">Card utilization <b><span id="s-util-v">0</span>%</b></label>
+            <input type="range" id="s-util" min="0" max="100" step="1" value="0">
+          </div>
+          <div class="field">
+            <label for="s-claim">Claimed by someone else <b><span id="s-claim-v">0</span> GB</b></label>
+            <input type="range" id="s-claim" min="0" max="24" step="0.1" value="0">
+          </div>
+          <div class="field">
+            <label for="s-need">Your task needs <b><span id="s-need-v">3.5</span> GB</b></label>
+            <input type="range" id="s-need" min="0.1" max="24" step="0.1" value="3.5">
+          </div>
+          <div class="field">
+            <label for="s-needutil">…and <b><span id="s-needutil-v">60</span>%</b> of the compute</label>
+            <input type="range" id="s-needutil" min="0" max="100" step="1" value="60">
+          </div>
+          <div class="field" style="margin-bottom:.5rem">
+            <label for="s-resv">Desktop reserve <b><span id="s-resv-v">2.0</span> GB / 25%</b></label>
+            <input type="range" id="s-resv" min="0" max="12" step="0.5" value="2">
+          </div>
+          <div class="switchrow" style="margin-bottom:.8rem">
+            <input type="checkbox" id="s-window">
+            <label for="s-window" style="margin:0">A reserved window is in force</label>
+          </div>
+          <div class="switchrow">
+            <input type="checkbox" id="s-protect" checked>
+            <label for="s-protect" style="margin:0">A protected colleague is on the card</label>
+          </div>
+        </div>
+
+        <div>
+          <div class="meter">
+            <div class="meter-track" id="meter" role="img" aria-label="Card memory split" aria-describedby="meter-table"></div>
+            <div class="meter-scale"><span>0</span><span id="meter-total">6.0 GB</span></div>
+          </div>
+
+          <div class="legend" aria-hidden="true">
+            <span><i style="background:var(--neutral-fill)"></i>Someone else</span>
+            <span><i style="background:var(--series-1)"></i>Your task</span>
+            <span><i style="background:var(--series-2)"></i>Desktop reserve</span>
+            <span><i style="background:var(--track);border:1px solid var(--border)"></i>Free</span>
+          </div>
+
+          <div class="chain" id="chain" aria-hidden="true"></div>
+          <!-- the "someone else" and "desktop reserve" segments are
+               illustrative placeholders, not derived from the sliders -->
+          <p class="meter-note" id="meter-note">Free-vs-claimed is live; the
+            other two segments illustrate a card in use.</p>
+
+          <div class="verdict-box" id="verdict">
+            <div class="head" id="verdict-head"></div>
+            <pre class="math" id="verdict-math"></pre>
+            <p class="fired" id="verdict-why"></p>
+          </div>
+
+          <div class="scroll-x" style="margin-top:1rem">
+            <table id="meter-table">
+              <caption class="visually-hidden">Card memory split as a table</caption>
+              <thead><tr><th scope="col">Segment</th><th scope="col">GB</th></tr></thead>
+              <tbody id="meter-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── sharing ───────────────────────────────────────────────────────── -->
+<section id="sharing">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="kicker">Sharing a card</span>
+      <h2>One directory, and everybody is coordinated</h2>
+      <p>
+        Point every <code>bider</code> at a folder the group can all see. No
+        server to run, no port to open, nothing to be granted access to.
+      </p>
+    </div>
+
+    <div class="codewrap">
+      <pre><span class="c"># once per person, pointing at the same place</span>
+bider config --set <span class="k">shared_dir</span>=/shared/gpucard
+bider config --set <span class="k">owner</span>=yourname</pre>
+      <button class="copy" data-copy="sharing-cmd" type="button">Copy</button>
+    </div>
+    <span id="sharing-cmd" hidden>bider config --set shared_dir=/shared/gpucard
+bider config --set owner=yourname</span>
+
+    <div class="grid3" style="margin-top:1.5rem">
+      <div class="card">
+        <h3 style="margin-bottom:.4rem">claims/</h3>
+        <p style="color:var(--text-secondary);font-size:.9rem;margin:0">
+          One file per job, with a TTL. Two colleagues starting at the same
+          instant cannot both win. A claim whose process died is dropped after a
+          short grace period, so a crash cannot hold the card hostage.
+        </p>
+      </div>
+      <div class="card">
+        <h3 style="margin-bottom:.4rem">memory/</h3>
+        <p style="color:var(--text-secondary);font-size:.9rem;margin:0">
+          What each person has published about their own needs. You can see that
+          Wei has a deadline this week, and stay out of its way — which is the
+          whole point of putting a tool on a shared machine.
+        </p>
+      </div>
+      <div class="card">
+        <h3 style="margin-bottom:.4rem">intent board</h3>
+        <p style="color:var(--text-secondary);font-size:.9rem;margin:0">
+          <code>bider intent publish</code> says “I am waiting for 5 GB.” Read-only
+          to others, and it never blocks anybody by itself. People who never
+          publish still appear, as claims, once they start.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── memory ────────────────────────────────────────────────────────── -->
+<section id="memory">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="kicker">Memory</span>
+      <h2>What the machine knows about the others</h2>
+      <p>
+        The most useful part, and the reason this is more than a polling loop.
+        These entries outrank every heuristic.
+      </p>
+    </div>
+
+    <div class="tabs" role="tablist" aria-label="Memory entry kinds">
+      <button role="tab" id="tab-protected" aria-controls="panel-protected" aria-selected="true">protected</button>
+      <button role="tab" id="tab-window" aria-controls="panel-window" aria-selected="false">window</button>
+      <button role="tab" id="tab-profile" aria-controls="panel-profile" aria-selected="false">profile</button>
+    </div>
+
+    <div class="card">
+      <div class="tabpanel" id="panel-protected" role="tabpanel" aria-labelledby="tab-protected">
+        <p><b>Never disturb this person's processes.</b> It applies only while one
+          of them is actually <em>on the card</em> — when they are not running you
+          are free to use the machine, and the entry survives so a later session
+          still knows about them.</p>
+        <ul>
+          <li><b><code>--until</code></b> lets it lapse on its own, so a
+            “deadline this week” flag does not become a permanent claim.</li>
+          <li><b><code>--task</code></b> scopes it to one of your own runs.</li>
+          <li><b><code>--private</code></b> keeps it out of the shared directory.</li>
+        </ul>
+        <div class="codewrap">
+          <pre id="mem-eg-1">bider memory --protect wei --match loro_train \
+      --because "deadline this week" --until 2026-10-22</pre>
+          <button class="copy" data-copy="mem-eg-1" type="button">Copy</button>
+        </div>
+      </div>
+
+      <div class="tabpanel" id="panel-window" role="tabpanel" aria-labelledby="tab-window" hidden>
+        <p><b>Recurring time reserved for someone</b>, possibly crossing midnight.
+          The watcher will not start a task inside one, and will not begin a run
+          in the last few minutes before one opens — there is no point starting a
+          two-hour job at 13:55 before a 14:00 reservation.</p>
+        <ul>
+          <li><b>Crosses midnight</b> with <code>--from 22:00 --to 02:00</code>.</li>
+          <li><b>Weekday-aware</b>: <code>--days mon-fri</code>, or
+            <code>sat,sun</code>, or a wrapping <code>fri-mon</code>.</li>
+          <li><b>Honest limit:</b> without preemption a window can only stop bider
+            from <em>occupying</em> the card. It cannot make a running job stop.</li>
+        </ul>
+        <div class="codewrap">
+          <pre id="mem-eg-2">bider memory --window wei --from 14:00 --to 18:00 --days mon-fri</pre>
+          <button class="copy" data-copy="mem-eg-2" type="button">Copy</button>
+        </div>
+      </div>
+
+      <div class="tabpanel" id="panel-profile" role="tabpanel" aria-labelledby="tab-profile" hidden>
+        <p><b>How a process family behaves.</b> <code>--vram heavy --util light</code>
+          describes something that holds memory but barely computes — so the queue
+          is reordered toward tasks shaped the opposite way, and the two jobs
+          coexist instead of contending.</p>
+        <ul>
+          <li><b>Advice, not a veto.</b> It biases ordering; <code>pin</code> and
+            <code>rank</code> still win.</li>
+          <li><b><code>--suggest</code></b> promotes a family to a profile only
+            after several polls agree, and marks it
+            <code>"source": "observed"</code> — so you can tell evidence from a
+            statement.</li>
+        </ul>
+        <div class="codewrap">
+          <pre id="mem-eg-3">bider memory --profile train --profile-vram heavy --profile-util light
+bider memory --suggest   <span class="c"># learn shapes from what it has seen</span></pre>
+          <button class="copy" data-copy="mem-eg-3" type="button">Copy</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── eta + explain ─────────────────────────────────────────────────── -->
+<section>
+  <div class="wrap">
+    <div class="grid2">
+      <div class="card">
+        <span class="kicker">Explain a wait</span>
+        <h3 style="margin-bottom:.6rem">“Why hasn't my job started?”</h3>
+        <p style="color:var(--text-secondary);font-size:.92rem">
+          The question every scheduler gets asked, answered in prose with the
+          numbers behind it: the reserved window, the protected colleague, the
+          shortfall, who holds the card, who registered first.
+        </p>
+        <div class="codewrap" style="margin-top:1rem">
+          <pre id="explain-eg">$ bider explain
+Task 'lr-sweep' wants 3.50GB and 60% of the card, and has been waiting 22 min.
+It cannot start yet:
+  - wei is running and is protected (deadline this week).
+    Waiting for it to finish is the point.
+  - free 5.85GB - need 3.50GB = 2.35GB < reserve 2.00GB</pre>
+          <button class="copy" data-copy="explain-eg" type="button">Copy</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <span class="kicker">Estimate a finish</span>
+        <h3 style="margin-bottom:.6rem">How much longer will that take?</h3>
+        <p style="color:var(--text-secondary);font-size:.92rem">
+          Reads the log tail, matches tqdm bars, <code>21/50</code>,
+          <code>Epoch 3/10</code>, <code>step 250/1000</code> and bare
+          percentages, then projects from the rate the number is moving at
+          <em>now</em> — discarding samples from before a restart.
+        </p>
+        <div class="codewrap" style="margin-top:1rem">
+          <pre id="eta-eg">$ bider estimate --pid 12345 --log job.log --json
+{
+  "progress": { "current": 340, "total": 1000, "percent": 34.0 },
+  "eta_s": 1440, "eta_human": "24m00s",
+  "basis": "progress 210 -> 340 over 300s (26.00%/min, 6 samples)"
+}</pre>
+          <button class="copy" data-copy="eta-eg" type="button">Copy</button>
+        </div>
+        <p style="color:var(--text-secondary);font-size:.88rem;margin:.9rem 0 0">
+          <b style="color:var(--text-primary)">No progress marker means no ETA.</b>
+          It returns <code>null</code> and says what it looked for, rather than
+          guessing.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── limits ────────────────────────────────────────────────────────── -->
+<section id="limits">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="kicker">Limitations, stated plainly</span>
+      <h2>What this cannot do</h2>
+      <p>
+        Written down because a scheduler you cannot reason about is worse than no
+        scheduler. Every one of these is a design decision, not a bug report
+        waiting to happen.
+      </p>
+    </div>
+
+    <div class="card limits">
+      <div class="limit"><span class="mk"></span><span>
+        <b>Windows/WDDM reports <code>[N/A]</code> for per-process GPU memory.</b>
+        Bider therefore never attributes memory to a process. It diffs whole-GPU
+        totals and diffs the set of compute PIDs — both reliable. On Linux, NVML
+        does report per-process memory and estimates get better.</span></div>
+      <div class="limit"><span class="mk"></span><span>
+        <b>Inside a container, pid attribution can be wrong.</b> <code>nvidia-smi</code>
+        may report host pids. Protected-process matching then fails <em>open</em>:
+        it will not block.</span></div>
+      <div class="limit"><span class="mk"></span><span>
+        <b>A shared directory over NFS has unreliable locking.</b> Claims are
+        TTL-based as well as locked, so a lost race costs a duplicate write and a
+        re-evaluation — never a stuck card.</span></div>
+      <div class="limit"><span class="mk"></span><span>
+        <b>Pids get reused.</b> A claim guards against it with a TTL and a liveness
+        check; a very unlucky reuse could still mislead a protected-process
+        match.</span></div>
+      <div class="limit"><span class="mk"></span><span>
+        <b>Utilization is not a reservation.</b> Two jobs each claiming 50% do not
+        cleanly share a card — they contend. The util figure is a politeness
+        margin, not a partition. Real isolation needs MIG or MPS, which is a
+        different tool.</span></div>
+      <div class="limit"><span class="mk"></span><span>
+        <b>Nobody is obliged to use this.</b> Someone who has never heard of bider
+        can start a job whenever they like. Bider is built to lose gracefully when
+        that happens.</span></div>
+    </div>
+
+    <div class="grid2" style="margin-top:1.5rem">
+      <div class="card">
+        <h3 style="margin-bottom:.5rem">Deliberately out of scope</h3>
+        <div class="scroll-x">
+          <table>
+            <tbody>
+              <tr><td><b>Preemption</b></td><td>Never. It does not stop other people's work.</td></tr>
+              <tr><td><b>A server</b></td><td>Sharing is a directory. Nothing to run, nothing to be granted.</td></tr>
+              <tr><td><b>MIG / MPS</b></td><td>Real partitioning is a different tool.</td></tr>
+              <tr><td><b>Fair-share quotas</b></td><td>A group needing quotas wants Slurm. The niche is the small box with no admin.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card">
+        <h3 style="margin-bottom:.5rem">Tests that never touch a GPU</h3>
+        <p style="color:var(--text-secondary);font-size:.92rem">
+          Two suites, both driven by a fake card through
+          <code>BIDER_FAKE_GPU</code> — so the watcher is tested without loading
+          the device that is currently drawing somebody's screen.
+        </p>
+        <div class="codewrap" style="margin-top:.9rem">
+          <pre id="test-eg">bider selftest       <span class="c"># scheduling, claims, memory, ETA maths</span>
+python test_e2e.py   <span class="c"># watcher edges, two-user claims, CLI, sharing</span></pre>
+          <button class="copy" data-copy="test-eg" type="button">Copy</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap foot-in">
+    <span>MIT licensed · <a href="https://github.com/wkmallmx/gpu-bider">github.com/wkmallmx/gpu-bider</a></span>
+    <span>One file. No dependencies. No telemetry.</span>
+  </div>
+</footer>
+
+<script>
+(function () {
+  "use strict";
+
+  /* ── theme toggle ───────────────────────────────────────────────────── */
+  var root = document.documentElement;
+  var btn = document.getElementById("theme");
+  var stored = null;
+  try { stored = localStorage.getItem("bider-theme"); } catch (e) {}
+  if (stored === "light" || stored === "dark") root.setAttribute("data-theme", stored);
+  btn.addEventListener("click", function () {
+    var now = root.getAttribute("data-theme");
+    if (now === "auto") now = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+    var next = now === "dark" ? "light" : "dark";
+    root.setAttribute("data-theme", next);
+    try { localStorage.setItem("bider-theme", next); } catch (e) {}
+  });
+
+  /* ── copy buttons ───────────────────────────────────────────────────── */
+  Array.prototype.forEach.call(document.querySelectorAll(".copy"), function (b) {
+    b.addEventListener("click", function () {
+      var el = document.getElementById(b.dataset.copy);
+      var text = el ? el.textContent : "";
+      var done = function () {
+        b.textContent = "Copied";
+        b.classList.add("done");
+        setTimeout(function () { b.textContent = "Copy"; b.classList.remove("done"); }, 1400);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done, function () { fallback(text, done); });
+      } else { fallback(text, done); }
+    });
+  });
+  function fallback(text, done) {
+    var ta = document.createElement("textarea");
+    ta.value = text; ta.setAttribute("readonly", ""); ta.style.position = "fixed";
+    ta.style.left = "-9999px"; document.body.appendChild(ta); ta.select();
+    try { document.execCommand("copy"); done(); } catch (e) {}
+    document.body.removeChild(ta);
+  }
+
+  /* ── memory-kind tabs ───────────────────────────────────────────────── */
+  var tabs = Array.prototype.slice.call(document.querySelectorAll('[role="tab"]'));
+  tabs.forEach(function (t) {
+    t.addEventListener("click", function () {
+      tabs.forEach(function (o) {
+        var on = o === t;
+        o.setAttribute("aria-selected", on ? "true" : "false");
+        document.getElementById(o.getAttribute("aria-controls")).hidden = !on;
+      });
+    });
+    t.addEventListener("keydown", function (e) {
+      var i = tabs.indexOf(t), j = e.key === "ArrowRight" ? i + 1 : e.key === "ArrowLeft" ? i - 1 : -1;
+      if (j < 0) return;
+      e.preventDefault();
+      tabs[(j + tabs.length) % tabs.length].focus();
+      tabs[(j + tabs.length) % tabs.length].click();
+    });
+  });
+
+  /* ── the simulator ──────────────────────────────────────────────────────
+     The same five gates, in the same order, with the same arithmetic as
+     bider.py's evaluate(). Kept deliberately literal so the page and the
+     program cannot quietly disagree.
+     --------------------------------------------------------------------- */
+  var CAP = 6.0;                     // the 6 GB card this was written on
+  var ids = ["s-free", "s-util", "s-claim", "s-need", "s-needutil", "s-resv"];
+  var els = {};
+  ids.forEach(function (id) { els[id] = document.getElementById(id); });
+  var out = {
+    "s-free": document.getElementById("s-free-v"),
+    "s-util": document.getElementById("s-util-v"),
+    "s-claim": document.getElementById("s-claim-v"),
+    "s-need": document.getElementById("s-need-v"),
+    "s-needutil": document.getElementById("s-needutil-v"),
+    "s-resv": document.getElementById("s-resv-v")
+  };
+  var meter = document.getElementById("meter");
+  var tbody = document.getElementById("meter-tbody");
+  var chain = document.getElementById("chain");
+  var box = document.getElementById("verdict");
+  var head = document.getElementById("verdict-head");
+  var math = document.getElementById("verdict-math");
+  var why = document.getElementById("verdict-why");
+  var wantWindow = document.getElementById("s-window");
+  var wantProtect = document.getElementById("s-protect");
+
+  var OK_ICON = '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10" cy="10" r="8"/><path d="M6.4 10.3l2.4 2.4 4.8-5"/></svg>';
+  var NO_ICON = '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="10" cy="10" r="8"/><path d="M7 7l6 6M13 7l-6 6"/></svg>';
+
+  function n(v, d) { return (Math.round(v * Math.pow(10, d)) / Math.pow(10, d)).toFixed(d); }
+
+  function render() {
+    var free = parseFloat(els["s-free"].value);
+    var util = parseFloat(els["s-util"].value);
+    var claim = parseFloat(els["s-claim"].value);
+    var need = parseFloat(els["s-need"].value);
+    var needUtil = parseFloat(els["s-needutil"].value);
+    var resv = parseFloat(els["s-resv"].value);
+    var resvUtil = 25;
+
+    out["s-free"].textContent = n(free, 1);
+    out["s-util"].textContent = n(util, 0);
+    out["s-claim"].textContent = n(claim, 1);
+    out["s-need"].textContent = n(need, 1);
+    out["s-needutil"].textContent = n(needUtil, 0);
+    out["s-resv"].textContent = n(resv, 1) + " / 25%";
+
+    var others = Math.max(0, CAP - free - claim);
+    var claimed = Math.min(claim, free);
+
+    /* gate 1 — memory (hard block) */
+    var windowOn = wantWindow.checked;
+    var protectOn = wantProtect.checked;
+
+    /* gate 2 — claims */
+    var freeAfterClaims = free - claim;
+
+    /* gate 3 — capacity */
+    var utilAfterClaims = util + Math.min(100, (claim / Math.max(CAP, 0.001)) * 100);
+    var vramAfter = freeAfterClaims - need;
+    var utilIdle = 100 - utilAfterClaims;
+    var utilAfter = utilIdle - needUtil;
+    var vramOK = vramAfter >= resv;
+    var utilOK = utilAfter >= resvUtil;
+    var fits = vramOK && utilOK;
+
+    /* ── the meter: others | mine | reserve | free, with 2px surface gaps ── */
+    var segs = [];
+    if (others > 0.001) segs.push({ k: "others", label: "others", gb: others });
+    if (fits) segs.push({ k: "mine", label: "your task", gb: need });
+    var reserveSeg = Math.min(resv, CAP - others - (fits ? need : 0));
+    if (reserveSeg > 0.001) segs.push({ k: "resv", label: "reserve", gb: reserveSeg });
+    var used = segs.reduce(function (a, s) { return a + s.gb; }, 0);
+    var freeSeg = Math.max(0, CAP - used);
+    if (freeSeg > 0.001) segs.push({ k: "free", label: "free", gb: freeSeg });
+
+    meter.innerHTML = "";
+    var rows = "";
+    segs.forEach(function (s) {
+      var pct = (s.gb / CAP) * 100;
+      var d = document.createElement("div");
+      d.className = "meter-seg " + s.k;
+      d.style.width = pct + "%";
+      /* label inside only when it actually fits — never clipped */
+      if (pct > 13) d.textContent = n(s.gb, 1);
+      else if (s.k !== "free") d.setAttribute("title", s.label + ": " + n(s.gb, 1) + " GB");
+      d.setAttribute("aria-hidden", "true");
+      meter.appendChild(d);
+      rows += "<tr><td>" + s.label + "</td><td>" + n(s.gb, 2) + "</td></tr>";
+    });
+    tbody.innerHTML = rows;
+    document.getElementById("meter-total").textContent = n(CAP, 1) + " GB";
+
+    /* ── the gate chain ─────────────────────────────────────────────────── */
+    var stopped = null;
+    /* exactly four gates are simulated; the intent board needs other people's
+       files, so it is not a slider.  Saying so beats implying it is covered. */
+    var gates = [
+      { k: "memory", pass: !(windowOn || protectOn) },
+      { k: "claims", pass: freeAfterClaims >= need },
+      { k: "capacity", pass: fits },
+      { k: "first fit", pass: true }
+    ];
+    gates.forEach(function (g) {
+      if (stopped === null && !g.pass) stopped = g.k;
+    });
+    chain.innerHTML = gates.map(function (g) {
+      var cls = "on";
+      if (stopped === g.k) cls += " stop";
+      else if (stopped === null) cls += " pass";
+      else if (gates.indexOf(g) < gates.findIndex(function (x) { return x.k === stopped; })) cls += " pass";
+      return '<span class="' + cls + '">' + g.k + "</span>";
+    }).join("") + '<span class="on">intent</span>';
+
+    /* ── verdict ────────────────────────────────────────────────────────── */
+    var runnable = stopped === null;
+    box.className = "verdict-box " + (runnable ? "yes" : "no");
+    head.innerHTML = (runnable ? OK_ICON : NO_ICON) +
+      "<span>" + (runnable ? "It can start right now" : "It cannot start yet") + "</span>";
+
+    var lines = [
+      "card free        " + n(free, 2) + " GB",
+      "claimed by others " + n(claim, 2) + " GB",
+      "usable           " + n(freeAfterClaims, 2) + " GB",
+      "",
+      "vram  " + n(freeAfterClaims, 2) + " - " + n(need, 2) + " = " + n(vramAfter, 2) +
+        "   (reserve " + n(resv, 2) + ")" + (vramOK ? "  ok" : "  short"),
+      "util  " + n(utilIdle, 1) + "% - " + n(needUtil, 0) + "% = " + n(utilAfter, 1) +
+        "%   (reserve " + n(resvUtil, 0) + "%)" + (utilOK ? "  ok" : "  short")
+    ];
+    math.textContent = lines.join("\n");
+
+    var msg;
+    if (windowOn) {
+      msg = "<b>The card is reserved right now.</b> Bider does not take a card " +
+            "during a reserved window, however much room there is. " +
+            "It will start when the window closes.";
+    } else if (protectOn) {
+      msg = "<b>A protected colleague is on the card.</b> Their process is not " +
+            "something bider is willing to compete with, so it waits for them to " +
+            "finish — that is the point of the entry, not a side effect.";
+    } else if (!vramOK) {
+      msg = "<b>Not enough memory.</b> After your task there would be " +
+            n(vramAfter, 2) + " GB left, and the desktop needs " + n(resv, 2) +
+            " GB. " + (claim > 0.001
+              ? "Some of that gap is " + n(claim, 2) + " GB claimed by another bider."
+              : "Lower the reserve, or wait for the card to empty.");
+    } else if (!utilOK) {
+      msg = "<b>Not enough compute.</b> Memory is fine, but with " +
+            n(utilAfterClaims, 0) + "% already busy there would be only " +
+            n(utilAfter, 1) + "% left for the desktop, under the " +
+            n(resvUtil, 0) + "% floor.";
+    } else {
+      msg = "<b>It fits.</b> " + n(vramAfter, 2) + " GB and " + n(utilAfter, 1) +
+            "% would be left over. Bider starts it, writes a claim so nobody " +
+            "else concludes the same thing, and re-checks before it actually " +
+            "launches.";
+    }
+    why.innerHTML = msg;
+  }
+
+  ids.forEach(function (id) { els[id].addEventListener("input", render); });
+  wantWindow.addEventListener("change", render);
+  wantProtect.addEventListener("change", render);
+  render();
+})();
+</script>
+</body>
+</html>

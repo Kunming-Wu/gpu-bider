@@ -1,0 +1,14 @@
+# Normalize to LF in the repository.  CI runs on Linux, macOS and Windows, and
+# bider.py is meant to be readable (and diffable) as a plain text file on all
+# three; leaving line endings to core.autocrlf makes the same commit differ per
+# machine.
+* text=auto eol=lf
+
+# Windows users still get working batch wrappers when install.py writes them.
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# Binary assets must never be touched.
+*.png binary
+*.jpg binary
+*.ico binary
